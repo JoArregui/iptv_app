@@ -49,5 +49,53 @@ https://streams.example/sport.m3u8
 
       expect(parseM3U(playlist).single.category, 'Deportes');
     });
+
+    test('reads an XMLTV source and tvg-id from playlist metadata', () {
+      const playlist = '''
+#EXTM3U url-tvg="../guide.xml"
+#EXTINF:-1 tvg-id="news.es" tvg-name="Noticias" group-title="General",Noticiero
+https://streams.example/news
+''';
+      final parsed = parseM3UPlaylist(
+        playlist,
+        baseUri: Uri.parse('https://lists.example/playlists/list.m3u'),
+      );
+
+      expect(parsed.epgUri, Uri.parse('https://lists.example/guide.xml'));
+      expect(parsed.channels.single.tvgId, 'news.es');
+    });
+
+    test('derives the XMLTV endpoint from a standard Xtream playlist URL', () {
+      final source = Uri.parse(
+        'https://provider.example:8443/get.php?username=user&password=secret&type=m3u_plus',
+      );
+
+      expect(
+        inferXtreamEpgUri(source),
+        Uri.parse(
+          'https://provider.example:8443/xmltv.php?username=user&password=secret',
+        ),
+      );
+    });
+
+    test('recognizes the configured Solanaflix Xtream host', () {
+      final source = Uri.parse(
+        'https://572369.solanaflix.com/playlist.m3u?username=user&password=secret',
+      );
+
+      expect(
+        inferXtreamEpgUri(source),
+        Uri.parse(
+          'https://572369.solanaflix.com/xmltv.php?username=user&password=secret',
+        ),
+      );
+    });
+
+    test('does not infer an EPG endpoint without Xtream credentials', () {
+      expect(
+        inferXtreamEpgUri(Uri.parse('https://provider.example/list.m3u')),
+        isNull,
+      );
+    });
   });
 }
