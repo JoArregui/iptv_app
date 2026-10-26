@@ -13,6 +13,7 @@ void main() {
       find.text('Carga una lista M3U para ver tus canales.'),
       findsOneWidget,
     );
+    expect(find.byType(Banner), findsNothing);
   });
 
   testWidgets('player error view fits in a compact player viewport', (
