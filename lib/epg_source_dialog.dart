@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 class EpgSourceDialog extends StatefulWidget {
-  const EpgSourceDialog({super.key});
+  const EpgSourceDialog({this.initialUrl = '', super.key});
+
+  final String initialUrl;
 
   @override
   State<EpgSourceDialog> createState() => _EpgSourceDialogState();
@@ -9,6 +11,12 @@ class EpgSourceDialog extends StatefulWidget {
 
 class _EpgSourceDialogState extends State<EpgSourceDialog> {
   final TextEditingController _urlController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _urlController.text = widget.initialUrl;
+  }
 
   @override
   void dispose() {

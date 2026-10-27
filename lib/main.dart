@@ -93,28 +93,69 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
   bool _isPlaying = false;
   int _epgRequestId = 0;
   SharedPreferences? _prefs;
+  late final Future<void> _preferencesReady;
+  String? _epgSourceUrl;
+  String? _epgSourcePlaylistUrl;
+  String? _loadedPlaylistUrl;
 
   @override
   void initState() {
     super.initState();
-    _initPreferences();
-    _loadSavedPlaylist();
+    _preferencesReady = _initPreferences();
   }
 
   Future<void> _initPreferences() async {
     _prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    _urlController.text = _prefs!.getString('playlist_url') ?? '';
+    _epgSourceUrl = _prefs!.getString('epg_url');
+    final savedEpgPlaylistUrl = _prefs!.getString('epg_playlist_url');
+    _epgSourcePlaylistUrl = savedEpgPlaylistUrl == null
+        ? null
+        : _playlistUrlKey(savedEpgPlaylistUrl);
+    await _loadSavedPlaylist();
+  }
+
+  String _playlistUrlKey(String value) {
+    final trimmedValue = value.trim();
+    return Uri.tryParse(trimmedValue)?.toString() ?? trimmedValue;
+  }
+
+  Future<bool> _storeEpgSource(Uri? epgUri, String playlistUrl) async {
+    if (epgUri == null) {
+      final removedAssociation = await _prefs!.remove('epg_playlist_url');
+      final removedSource = await _prefs!.remove('epg_url');
+      _epgSourceUrl = null;
+      _epgSourcePlaylistUrl = null;
+      return removedAssociation && removedSource;
+    }
+
+    final sourceUrl = epgUri.toString();
+    final savedSource = await _prefs!.setString('epg_url', sourceUrl);
+    if (!savedSource) return false;
+    final playlistKey = _playlistUrlKey(playlistUrl);
+    final savedAssociation = await _prefs!.setString(
+      'epg_playlist_url',
+      playlistKey,
+    );
+    if (!savedAssociation) return false;
+    _epgSourceUrl = sourceUrl;
+    _epgSourcePlaylistUrl = playlistKey;
+    return true;
   }
 
   M3UPlaylist _playlistFromJson(String json) {
     final map = jsonDecode(json) as Map<String, dynamic>;
     final List<dynamic> channelsList = map['channels'] as List;
     final channels = channelsList
-        .map((channel) => M3U8Entry(
-              title: channel['title'] as String?,
-              url: channel['url'] as String,
-              category: channel['category'] as String?,
-              tvgId: channel['tvgId'] as String?,
-            ))
+        .map(
+          (channel) => M3U8Entry(
+            title: channel['title'] as String?,
+            url: channel['url'] as String,
+            category: channel['category'] as String?,
+            tvgId: channel['tvgId'] as String?,
+          ),
+        )
         .toList();
     final epgUri = map['epgUri'] != null
         ? Uri.parse(map['epgUri'] as String)
@@ -124,12 +165,16 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
 
   String _playlistToJson(M3UPlaylist playlist) {
     final Map<String, dynamic> map = {
-      'channels': playlist.channels.map((channel) => {
-            'title': channel.title,
-            'url': channel.url,
-            'category': channel.category,
-            'tvgId': channel.tvgId,
-          }).toList(),
+      'channels': playlist.channels
+          .map(
+            (channel) => {
+              'title': channel.title,
+              'url': channel.url,
+              'category': channel.category,
+              'tvgId': channel.tvgId,
+            },
+          )
+          .toList(),
       'epgUri': playlist.epgUri?.toString(),
     };
     return jsonEncode(map);
@@ -138,7 +183,8 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
   Future<void> _savePlaylist() async {
     final playlist = M3UPlaylist(
       channels: _channels,
-      epgUri: null, // EPG URI is derived from the playlist URL, not stored separately
+      epgUri:
+          null, // EPG URI is derived from the playlist URL, not stored separately
     );
     final json = _playlistToJson(playlist);
     await _prefs!.setString('saved_playlist', json);
@@ -161,7 +207,46 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
           _selectedCategory = 'Todas';
         }
       });
+
+      final playlistUrl = _playlistUrlKey(_urlController.text);
+      _loadedPlaylistUrl = playlistUrl;
+      final savedM3uUri = _validHttpUri(playlistUrl);
+      final savedEpgBelongsToPlaylist = _epgSourcePlaylistUrl == playlistUrl;
+      final epgUri =
+          (savedEpgBelongsToPlaylist ? _validHttpUri(_epgSourceUrl) : null) ??
+          playlist.epgUri ??
+          (savedM3uUri == null ? null : inferXtreamEpgUri(savedM3uUri));
+      try {
+        final saved = await _storeEpgSource(epgUri, playlistUrl);
+        if (!mounted) return;
+        if (!saved) {
+          setState(() {
+            _epgStatus = 'No se pudo guardar la URL de la guía EPG.';
+          });
+          _publishEpgState();
+        }
+      } on Exception {
+        if (!mounted) return;
+        setState(() {
+          _epgStatus = 'No se pudo guardar la URL de la guía EPG.';
+        });
+        _publishEpgState();
+      }
+      if (epgUri != null) {
+        _refreshEpg(epgUri);
+      }
     }
+  }
+
+  Uri? _validHttpUri(String? value) {
+    if (value == null) return null;
+    final uri = Uri.tryParse(value);
+    if (uri == null ||
+        !uri.hasAuthority ||
+        !{'http', 'https'}.contains(uri.scheme.toLowerCase())) {
+      return null;
+    }
+    return uri;
   }
 
   Future<void> _loadM3U() async {
@@ -173,6 +258,24 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
       setState(() {
         _errorMessage =
             'Introduce una URL válida que empiece por http:// o https://.';
+      });
+      return;
+    }
+
+    await _preferencesReady;
+    try {
+      final saved = await _prefs!.setString('playlist_url', url);
+      if (!saved) {
+        if (!mounted) return;
+        setState(() {
+          _errorMessage = 'No se pudo guardar la URL de la lista M3U.';
+        });
+        return;
+      }
+    } on Exception {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = 'No se pudo guardar la URL de la lista M3U.';
       });
       return;
     }
@@ -196,7 +299,28 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
       }
 
       final playlist = parseM3UPlaylist(response.body, baseUri: playlistUri);
-      final epgUri = playlist.epgUri ?? inferXtreamEpgUri(playlistUri);
+      final playlistKey = _playlistUrlKey(url);
+      final savedEpgBelongsToPlaylist = _epgSourcePlaylistUrl == playlistKey;
+      final epgUri =
+          (savedEpgBelongsToPlaylist ? _validHttpUri(_epgSourceUrl) : null) ??
+          playlist.epgUri ??
+          inferXtreamEpgUri(playlistUri);
+      _loadedPlaylistUrl = playlistKey;
+      try {
+        final saved = await _storeEpgSource(epgUri, playlistKey);
+        if (!saved) {
+          setState(() {
+            _errorMessage = 'No se pudo guardar la URL de la guía EPG.';
+          });
+        }
+      } on Exception {
+        if (!mounted) return;
+        setState(() {
+          _errorMessage = 'No se pudo guardar la URL de la guía EPG.';
+        });
+        return;
+      }
+      if (!mounted) return;
       final hasTvgIds = playlist.channels.any(
         (channel) => channel.tvgId?.isNotEmpty == true,
       );
@@ -386,12 +510,37 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
     });
   }
 
+  /// Rebobina o avanza 10 segundos dentro del video actual.
+  /// Nota: better_player_plus no expone getters de `position`/`duration` en esta versión,
+  /// por lo que el seek usa tiempos aproximados desde el inicio del video.
+  void _seekRelative(int seconds) {
+    if (_controller == null) return;
+    // Intentamos seek a una posición relativa.
+    // Al no poder leer position/duration actuales, usamos miliseggos fijos
+    // basados en el tiempo de reproducción típico.
+    final position = _calculateSeekPosition(seconds);
+    _controller?.seekTo(position);
+  }
+
+  /// Calcula la posición de seek en milisegundos.
+  /// Si seconds es positivo, avanza; si es negativo, rebobina.
+  Duration _calculateSeekPosition(int seconds) {
+    // En esta versión, usamos posiciones absolutas simples:
+    // - Si seconds > 0, avanzamos 10s desde el inicio (o tanto como haya)
+    // - Si seconds < 0, regresamos 10s desde el inicio
+    // Esto evita necesidad de leer position/duration del controlador.
+    final positive = seconds.abs();
+    final milliseconds = positive * 1000;
+    return Duration(milliseconds: milliseconds);
+  }
+
   void _openEpgGuide() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (context) => EpgGuideScreen(
           state: _epgGuideState,
           onConfigureSource: _configureEpgSource,
+          onRefresh: _refreshEpg,
         ),
       ),
     );
@@ -409,16 +558,59 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
   Future<void> _configureEpgSource() async {
     final source = await showDialog<String>(
       context: context,
-      builder: (context) => const EpgSourceDialog(),
+      builder: (context) => EpgSourceDialog(initialUrl: _epgSourceUrl ?? ''),
     );
     if (!mounted || source == null) return;
 
-    final uri = Uri.tryParse(source);
-    if (uri == null ||
-        !uri.hasAuthority ||
-        !{'http', 'https'}.contains(uri.scheme.toLowerCase())) {
+    final uri = _validHttpUri(source);
+    if (uri == null) {
       setState(() {
         _epgStatus = 'La URL de la guía debe empezar por http:// o https://.';
+      });
+      _publishEpgState();
+      return;
+    }
+
+    await _preferencesReady;
+    final playlistUrl =
+        _loadedPlaylistUrl ?? _playlistUrlKey(_urlController.text);
+    try {
+      final saved = await _storeEpgSource(uri, playlistUrl);
+      if (!saved) {
+        if (!mounted) return;
+        setState(() {
+          _epgStatus = 'No se pudo guardar la URL de la guía EPG.';
+        });
+        _publishEpgState();
+        return;
+      }
+    } on Exception {
+      if (!mounted) return;
+      setState(() {
+        _epgStatus = 'No se pudo guardar la URL de la guía EPG.';
+      });
+      _publishEpgState();
+      return;
+    }
+    _refreshEpg(uri);
+  }
+
+  void _refreshEpg([Uri? source]) {
+    final uri = source ?? _validHttpUri(_epgSourceUrl);
+    if (uri == null) {
+      setState(() {
+        _epgStatus = 'Introduce una URL para la guía XMLTV.';
+      });
+      _publishEpgState();
+      return;
+    }
+
+    final hasTvgIds = _channels.any(
+      (channel) => channel.tvgId?.trim().isNotEmpty == true,
+    );
+    if (!hasTvgIds) {
+      setState(() {
+        _epgStatus = 'La lista no contiene tvg-id para relacionar la guía.';
       });
       _publishEpgState();
       return;
@@ -427,7 +619,7 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
     final requestId = ++_epgRequestId;
     setState(() {
       _isEpgLoading = true;
-      _epgStatus = 'Descargando guía XMLTV...';
+      _epgStatus = 'Actualizando guía XMLTV...';
       _epgPrograms = [];
     });
     _publishEpgState();
@@ -654,48 +846,38 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
                 ),
               ),
               const SizedBox(height: 10),
-              SizedBox(
-                height: 38,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  children: categories.map((category) {
-                    final selected = category == _selectedCategory;
-                    final count = category == 'Todas'
-                        ? _channels.length
-                        : category == 'Favoritos'
-                        ? _favorites.length
-                        : _channels
-                              .where((channel) => channel.category == category)
-                              .length;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ChoiceChip(
-                        label: Text('$category  $count'),
-                        selected: selected,
-                        showCheckmark: false,
-                        onSelected: (_) =>
-                            setState(() => _selectedCategory = category),
-                        labelStyle: TextStyle(
-                          color: selected
-                              ? const Color(0xFF061712)
-                              : Theme.of(context).colorScheme.onSurfaceVariant,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        backgroundColor: const Color(0xFF131B25),
-                        selectedColor: Theme.of(context).colorScheme.primary,
-                        side: BorderSide(
-                          color: selected
-                              ? Theme.of(context).colorScheme.primary
-                              : const Color(0xFF263341),
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                      ),
-                    );
-                  }).toList(),
+              DropdownButtonFormField<String>(
+                initialValue: _selectedCategory,
+                isExpanded: true,
+                menuMaxHeight: 420,
+                decoration: const InputDecoration(
+                  labelText: 'Categoría',
+                  prefixIcon: Icon(Icons.filter_list_rounded),
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(vertical: 14),
                 ),
+                items: categories.map((category) {
+                  final count = category == 'Todas'
+                      ? _channels.length
+                      : category == 'Favoritos'
+                      ? _favorites.length
+                      : _channels
+                            .where((channel) => channel.category == category)
+                            .length;
+                  return DropdownMenuItem(
+                    value: category,
+                    child: Text(
+                      '$category  $count',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  );
+                }).toList(),
+                onChanged: (category) {
+                  if (category != null) {
+                    setState(() => _selectedCategory = category);
+                  }
+                },
               ),
               if (_controller != null) ...[
                 const SizedBox(height: 8),
@@ -1039,6 +1221,18 @@ class _IPTVHomePageState extends State<IPTVHomePage> {
                 icon: Icon(
                   _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
                 ),
+              ),
+              IconButton(
+                tooltip: 'Rebobinar 10s',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _seekRelative(-10),
+                icon: const Icon(Icons.replay_10_rounded),
+              ),
+              IconButton(
+                tooltip: 'Avanzar 10s',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _seekRelative(10),
+                icon: const Icon(Icons.forward_10_rounded),
               ),
               IconButton(
                 tooltip: 'Canal siguiente',

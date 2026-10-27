@@ -22,11 +22,13 @@ class EpgGuideScreen extends StatelessWidget {
   const EpgGuideScreen({
     required this.state,
     this.onConfigureSource,
+    this.onRefresh,
     super.key,
   });
 
   final ValueListenable<EpgGuideState> state;
   final VoidCallback? onConfigureSource;
+  final VoidCallback? onRefresh;
 
   static const _channelWidth = 124.0;
   static const _hourWidth = 96.0;
@@ -60,7 +62,21 @@ class EpgGuideScreen extends StatelessWidget {
     }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Guía de programación')),
+      appBar: AppBar(
+        title: const Text('Guía de programación'),
+        actions: [
+          IconButton(
+            tooltip: 'Actualizar guía',
+            onPressed: guideState.isLoading ? null : onRefresh,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+          IconButton(
+            tooltip: 'Cambiar fuente EPG',
+            onPressed: onConfigureSource,
+            icon: const Icon(Icons.edit_rounded),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: guideState.isLoading
             ? const Center(child: CircularProgressIndicator())
